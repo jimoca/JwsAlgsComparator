@@ -1,114 +1,115 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/rsa"
+	"JwsAlgsTest/alg"
+	"JwsAlgsTest/config"
+	"JwsAlgsTest/model"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"time"
 
+	"github.com/DmitriyVTitov/size"
 	jwt "github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
-
-type Alg interface {
-	
-}
-
-type RSA struct {
-	publicKey  *rsa.PublicKey
-	privateKey *rsa.PrivateKey
-}
-
-type ECDSA struct {
-	publicKey  *ecdsa.PublicKey
-	privateKey *ecdsa.PrivateKey
-}
 
 var (
-	rsaKeys   RSA
-	ecdsaKeys ECDSA
-)
-
-const (
-	jsonString = `{
-		"sub": "member001",
-		"aud": "kioxiaApp2",
-		"nbf": 1661700103,
-		"scope": [
-		  "read",
-		  "openid",
-		  "write"
-		],
-		"iss": "http://192.168.0.100:30200",
-		"exp": 1662304903,
-		"iat": 1661700103,
-		"device": {
-		  "deviceId": 1,
-		  "employee": null,
-		  "name": "Win",
-		  "firewall": true,
-		  "antivirus": false,
-		  "os": "Windows",
-		  "osVersion": "21H2",
-		  "osLatestUpdate": 1516239022,
-		  "deviceType": "Computer",
-		  "firstLoginTime": 1661700100159,
-		  "riskAnalysis": "Unevaluated",
-		  "deviceActivityList": [
-			{
-			  "deviceActivityId": 1,
-			  "ipAddress": "0:0:0:0:0:0:0:1",
-			  "activityStatus": "Latest",
-			  "loginTime": 1661700100165
-			}
-		  ]
-		}
-	  }`
+	rsaKeys   model.RSA
+	ecdsaKeys model.ECDSA
 )
 
 func init() {
-	genRSAKeys()
-	genECDSAKeys()
+	rsaKeys = *alg.GenRSAKeys()
+	ecdsaKeys = *alg.GenECDSAKeys()
 }
 
 func main() {
-	// token, _ := createToken(jwt.SigningMethodRS256)
-	// fmt.Println(token)
+	jsonString := config.JsonString
 
-	fmt.Print(getClaims(jsonString))
+	rs256TokenStr := createAndMeasure(jsonString, jwt.SigningMethodRS256)
+	verifyAndMeasure(rs256TokenStr, jwt.SigningMethodRS256)
+
+	es256TokenStr := createAndMeasure(jsonString, jwt.SigningMethodES256)
+	verifyAndMeasure(es256TokenStr, jwt.SigningMethodES256)
 }
 
-func genRSAKeys() {
+func createAndMeasure(jsonStr string, alg jwt.SigningMethod) (tokenStr string) {
+	fmt.Printf("Length of claims: %d.\n", len(jsonStr))
+	fmt.Printf("Size of claims: %d.\n", size.Of(jsonStr))
+	start := time.Now()
+	tokenStr = createToken(jsonStr, alg)
+	elapsed := time.Since(start)
+	fmt.Printf("--%s start--\n", alg.Alg())
+	fmt.Println(tokenStr)
+	fmt.Printf("--%s end--\n", alg.Alg())
+
+	fmt.Printf("Length of %s token: %d.\n", alg.Alg(), len(tokenStr))
+	fmt.Printf("Size of %s token: %d.\n", alg.Alg(), size.Of(tokenStr))
+
+	log.Printf("%s sign took %s\n", alg.Alg(), elapsed)
+	return
+}
+
+func verifyAndMeasure(tokenStr string, alg jwt.SigningMethod) {
+	start := time.Now()
+	token := verifyToken(tokenStr, alg)
+	elapsed := time.Since(start)
+	fmt.Printf("%s valid: %t \n", alg.Alg(), token.Valid)
+	log.Printf("%s verify took %s", alg.Alg(), elapsed)
+}
+
+func createToken(jsonStr string, alg jwt.SigningMethod) (tokenStr string) {
+
+	token := jwt.NewWithClaims(alg, getClaims(jsonStr))
+	uuid := uuid.New()
+	key := uuid.String()
+	delete(token.Header, "typ")
+	token.Header["kid"] = key
+
 	err := error(nil)
-	if rsaKeys.privateKey, err = rsa.GenerateKey(rand.Reader, 2048); err != nil {
-		fmt.Printf("Cannot generate RSA key\n")
-		os.Exit(1)
+	switch alg {
+	case jwt.SigningMethodES256:
+		if tokenStr, err = token.SignedString(ecdsaKeys.PrivateKey); err != nil {
+			log.Printf("Signing Error -> es256\n")
+			os.Exit(1)
+		}
+		break
+	case jwt.SigningMethodRS256:
+		if tokenStr, err = token.SignedString(rsaKeys.PrivateKey); err != nil {
+			log.Printf("Signing Error -> rs256\n")
+			os.Exit(1)
+		}
+		break
 	}
-	rsaKeys.publicKey = &rsaKeys.privateKey.PublicKey
-}
-
-func genECDSAKeys() {
-	err := error(nil)
-	if ecdsaKeys.privateKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
-		fmt.Printf("Cannot generate RSA key\n")
-		os.Exit(1)
-	}
-
-	ecdsaKeys.publicKey = &ecdsaKeys.privateKey.PublicKey
-}
-
-func createToken(alg jwt.SigningMethod) (tokenStr string, err error) {
-	token := jwt.NewWithClaims(alg, getClaims(jsonString))
-	if(alg.Alg() == jwt.SigningMethodES256) 
-	return token.SignedString(privateKey)
+	return
 }
 
 func getClaims(jsonStr string) (claims jwt.MapClaims) {
 	var result map[string]interface{}
 	json.Unmarshal([]byte(jsonStr), &result)
 	claims = result
+	return
+}
+
+func verifyToken(tokenStr string, alg jwt.SigningMethod) (token *jwt.Token) {
+	err := error(nil)
+	switch alg {
+	case jwt.SigningMethodES256:
+		if token, err = jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+			return ecdsaKeys.PublicKey, nil
+		}); err != nil {
+			log.Printf("Parse token Error -> es256\n %s", err)
+			os.Exit(1)
+		}
+	case jwt.SigningMethodRS256:
+		if token, err = jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
+			return rsaKeys.PublicKey, nil
+		}); err != nil {
+			log.Printf("Parse token Error -> rs256\n %s", err)
+			os.Exit(1)
+		}
+	}
 	return
 }
